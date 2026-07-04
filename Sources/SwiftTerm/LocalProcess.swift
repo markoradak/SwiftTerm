@@ -93,7 +93,19 @@ public class LocalProcess {
     private var pendingChunkIndex: Int = 0
     private var pendingScheduled = false
     private let pendingLock = NSLock()
-    
+    // Byte-counted high/low-water backpressure on the pending backlog: when the
+    // main-queue drain can't keep up, stop re-arming the read so the pty kernel
+    // buffer fills and the child blocks on write() (natural, zero-copy flow
+    // control). Prevents a flooding child (e.g. `cat /dev/urandom | base64`) from
+    // ballooning `pendingChunks` unboundedly. All three fields are read/written
+    // under `pendingLock`; `readParked` guarantees exactly one re-arm path is
+    // live at a time (read side parks under high-water, drain side re-arms under
+    // low-water), so the two queues can never double-arm.
+    private var pendingBytes: Int = 0
+    private var readParked = false
+    private let highWaterBytes = 16 * 1024 * 1024
+    private let lowWaterBytes = 8 * 1024 * 1024
+
     #if false //canImport(Subprocess)
     // Swift Subprocess related properties
     private var subprocessTask: Task<Void, Error>?
@@ -120,6 +132,7 @@ public class LocalProcess {
     private func enqueueReceivedData(_ bytes: [UInt8]) {
         pendingLock.lock()
         pendingChunks.append(bytes)
+        pendingBytes += bytes.count
         let shouldSchedule = !pendingScheduled
         if shouldSchedule {
             pendingScheduled = true
@@ -136,10 +149,18 @@ public class LocalProcess {
         let start = DispatchTime.now().uptimeNanoseconds
         while true {
             var chunk: [UInt8]?
+            var shouldReArm = false
             pendingLock.lock()
             if pendingChunkIndex < pendingChunks.count {
-                chunk = pendingChunks[pendingChunkIndex]
+                let c = pendingChunks[pendingChunkIndex]
+                chunk = c
                 pendingChunkIndex += 1
+                pendingBytes -= c.count
+                if pendingBytes < 0 { pendingBytes = 0 }
+                if readParked && pendingBytes < lowWaterBytes {
+                    readParked = false
+                    shouldReArm = true
+                }
                 if pendingChunkIndex >= pendingChunkFlushThreshold {
                     pendingChunks.removeFirst(pendingChunkIndex)
                     pendingChunkIndex = 0
@@ -148,10 +169,22 @@ public class LocalProcess {
                 pendingChunks.removeAll(keepingCapacity: true)
                 pendingChunkIndex = 0
                 pendingScheduled = false
+                pendingBytes = 0
+                let wasParked = readParked
+                readParked = false
                 pendingLock.unlock()
+                // Defensive: if the backlog somehow drained to empty while still
+                // parked, re-arm so the read chain never stays permanently parked.
+                if wasParked {
+                    io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+                }
                 return
             }
             pendingLock.unlock()
+
+            if shouldReArm {
+                io?.read(offset: 0, length: readSize, queue: readQueue, ioHandler: childProcessRead)
+            }
 
             if let chunk {
                 delegate?.dataReceived(slice: chunk[...])
@@ -275,6 +308,16 @@ public class LocalProcess {
         })
         if usesMainQueue {
             enqueueReceivedData(b)
+            pendingLock.lock()
+            let park = pendingBytes >= highWaterBytes
+            if park { readParked = true }
+            pendingLock.unlock()
+            if park {
+                // Backlog is full: do NOT re-arm the read. The pty kernel buffer
+                // fills and the child blocks on write(); drainReceivedData re-arms
+                // once the backlog falls below the low-water mark.
+                return
+            }
         } else {
             dispatchQueue.sync {
                 self.delegate?.dataReceived(slice: b[...])
