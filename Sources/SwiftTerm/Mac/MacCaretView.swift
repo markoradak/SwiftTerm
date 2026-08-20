@@ -44,7 +44,40 @@ class CaretView: NSView, CALayerDelegate {
         return layer
     }
     
+    /// The (character, attribute, colors) the current `ctline` was built from,
+    /// so an unchanged cell can skip the rebuild entirely.
+    private var renderedKey: CaretTextKey?
+
+    /// Identity of a rendered caret glyph. Compared instead of rebuilding.
+    private struct CaretTextKey: Equatable {
+        let code: Int32
+        let attribute: Attribute
+        let caret: NSColor
+        let caretText: NSColor?
+        /// Used as the background when `caretTextColor` is nil, so a theme
+        /// change that only moves the foreground still invalidates.
+        let nativeForeground: NSColor?
+    }
+
     func setText (ch: CharData) {
+        // `updateCursorPosition()` calls this on EVERY display tick, and a
+        // display tick happens whenever the pty produced output — so for a busy
+        // agent pane this ran at frame rate. Building an `NSAttributedString`
+        // and a `CTLine` for a cell that has not changed is pure waste, and
+        // `setNeedsDisplay` on top of it keeps the window's display cycle alive
+        // for a caret that looks identical.
+        //
+        // The cursor sits on the same character for most of a repaint burst
+        // (and on a space at an idle prompt), so the hit rate is high.
+        let key = CaretTextKey(
+            code: ch.code,
+            attribute: ch.attribute,
+            caret: caretColor,
+            caretText: caretTextColor,
+            nativeForeground: terminal?.nativeForegroundColor)
+        if key == renderedKey, ctline != nil { return }
+        renderedKey = key
+
         let character = terminal?.terminal.getCharacter(for: ch) ?? " "
         let res = NSAttributedString (
             string: String (character),
@@ -113,6 +146,12 @@ class CaretView: NSView, CALayerDelegate {
     }
 
     func updateView() {
+        // Appearance changed (colors, font, cursor style) — drop the memoized
+        // glyph so the next `setText` rebuilds rather than reusing a `CTLine`
+        // built with the old attributes. Cheap belt-and-braces on top of the
+        // key comparison, which cannot see everything `getAttributedValue`
+        // folds in (notably the font).
+        renderedKey = nil
         setNeedsDisplay(bounds)
     }
     

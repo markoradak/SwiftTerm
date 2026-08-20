@@ -58,6 +58,61 @@ final class CaretVisibilityTests: XCTestCase {
                        "showing the cursor must reveal the caret view")
     }
 
+    // MARK: caret glyph memo
+
+    /// The caret rebuilds an `NSAttributedString` + a `CTLine` on every display
+    /// tick, and `updateCursorPosition` runs one per tick — so for a busy pane
+    /// that was frame-rate glyph construction for a cell that usually has not
+    /// changed. Memoizing is only safe if a real change still invalidates, so
+    /// both directions are pinned here by comparing the CTLine *object*: a memo
+    /// hit reuses it, a miss builds a new one. Asserting merely that it is
+    /// non-nil would pass even with the memo permanently stuck.
+
+    func testUnchangedCellReusesTheCaretGlyph() {
+        let view = makeView()
+        view.feed(text: "\u{1b}[?25h")
+        view.updateDisplay(notifyAccessibility: false)
+        let first = try? XCTUnwrap(view.caretView?.ctline)
+        XCTAssertNotNil(first)
+
+        // Nothing about the cell or the colours changed.
+        view.updateDisplay(notifyAccessibility: false)
+        XCTAssertTrue(view.caretView?.ctline === first,
+                      "an unchanged cell must reuse the memoized CTLine")
+    }
+
+    /// `nativeForegroundColor` is folded into the glyph's attributes as the
+    /// background whenever `caretTextColor` is nil, but changing it does NOT
+    /// route through `updateView()` — so this is the case the memo *key* has to
+    /// cover on its own. (The `caretColor` test below is belt-and-braces: it
+    /// passes via `updateView()` even if the key omitted the colour.)
+    func testNativeForegroundChangeInvalidatesTheCaretGlyph() {
+        let view = makeView()
+        view.caretTextColor = nil
+        view.feed(text: "\u{1b}[?25h")
+        view.updateDisplay(notifyAccessibility: false)
+        let first = view.caretView?.ctline
+        XCTAssertNotNil(first)
+
+        view.nativeForegroundColor = .systemTeal
+        view.updateDisplay(notifyAccessibility: false)
+        XCTAssertFalse(view.caretView?.ctline === first,
+                       "a native-foreground change must rebuild the caret glyph")
+    }
+
+    func testColourChangeInvalidatesTheCaretGlyph() {
+        let view = makeView()
+        view.feed(text: "\u{1b}[?25h")
+        view.updateDisplay(notifyAccessibility: false)
+        let first = view.caretView?.ctline
+        XCTAssertNotNil(first)
+
+        view.caretColor = .systemRed
+        view.updateDisplay(notifyAccessibility: false)
+        XCTAssertFalse(view.caretView?.ctline === first,
+                       "a colour change must rebuild the caret glyph")
+    }
+
     /// The same, driven the way a program actually does it — the DECTCEM
     /// escape sequences fed through the emulator.
     func testDECTCEMSequencesDriveIsHiddenOnly() {
