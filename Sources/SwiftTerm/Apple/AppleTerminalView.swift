@@ -1665,14 +1665,43 @@ extension TerminalView {
         let buffer = terminal.displayBuffer
         let vy = buffer.yBase + buffer.y
         
-        if vy >= buffer.yDisp + buffer.rows {
-            caretView.removeFromSuperview()
-            return
-        } else if terminal.cursorHidden == false && caretView.superview != self {
-            addSubview(caretView)
-        } else if terminal.cursorHidden == true && caretView.superview == self {
-            caretView.removeFromSuperview()
-        }
+        // Mount the caret ONCE and drive its visibility with `isHidden`.
+        //
+        // This used to add and remove the caret view per state change, and
+        // `updateDisplay` calls this on every display tick — so a program that
+        // toggles the cursor (every full-screen TUI does, around each repaint)
+        // mutated the host view hierarchy many times a second, per terminal.
+        //
+        // A structural mutation is not local: `removeFromSuperview` tears the
+        // view's autoresizing constraints out of the window's shared
+        // `NSISEngine`, which notifies the constraint-based hosting view, which
+        // in an AppKit/SwiftUI app invalidates the hosted view's layout metrics
+        // and re-runs SwiftUI layout for the whole window. Measured in a
+        // 1,457-view window: ~4.9x the cost of an `isHidden` toggle in plain
+        // AppKit, and 30-47x once a SwiftUI host is involved.
+        //
+        // `isHidden` is equivalent for display — a hidden layer is skipped by
+        // CoreAnimation's display pass exactly as an absent one is — while
+        // costing nothing structurally.
+        if caretView.superview !== self { addSubview(caretView) }
+
+        // The caret is parked while the Metal renderer owns drawing (see
+        // `MacTerminalView`'s renderer setup, which hides it for that reason).
+        // Fold that into the same decision rather than letting two writers race
+        // over one property.
+        let parkedForMetal: Bool
+        #if canImport(MetalKit)
+        parkedForMetal = metalView != nil
+        #else
+        parkedForMetal = false
+        #endif
+
+        let scrolledOutOfView = vy >= buffer.yDisp + buffer.rows
+        let wantHidden = parkedForMetal || scrolledOutOfView || terminal.cursorHidden
+        if caretView.isHidden != wantHidden { caretView.isHidden = wantHidden }
+
+        // Scrolled out of the visible region: nothing to position.
+        if scrolledOutOfView { return }
         let doublePosition = buffer.lines [vy].renderMode == .single ? 1.0 : 2.0
         #if os(iOS) || os(visionOS)
         let offset = (cellDimension.height * (CGFloat(buffer.y+(buffer.yBase))))

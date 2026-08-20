@@ -2258,6 +2258,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         if caretView.superview == nil {
             addSubview(caretView)
         }
+        caretView.isHidden = false
     }
 
     open func hideCursor(source: Terminal) {
@@ -2265,7 +2266,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             queueMetalDisplay()
             return
         }
-        caretView.removeFromSuperview()
+        // `isHidden`, NOT `removeFromSuperview` — see the note in
+        // `AppleTerminalView.updateCursorPosition`. A program that hides and
+        // shows the cursor around every repaint would otherwise mutate the host
+        // view hierarchy at frame rate, invalidating the window's constraint
+        // engine (and, under a SwiftUI host, the whole window's layout) each
+        // time. The caret stays mounted and simply stops drawing.
+        caretView.isHidden = true
     }
     
     open func cursorStyleChanged (source: Terminal, newStyle: CursorStyle) {
