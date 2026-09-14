@@ -23,6 +23,15 @@ public final class BufferLine: CustomDebugStringConvertible {
     }
     var isWrapped: Bool
     var renderMode: RenderLineMode = .single
+    /// Incremented whenever this line's rendered content actually changes.
+    /// A renderer can cache per-line work against it. It deliberately does NOT
+    /// move when a cell is rewritten with identical content, because agent TUIs
+    /// repaint whole screens and a write-counting version would never be stable.
+    public private(set) var version: UInt64 = 0
+
+    @inline(__always)
+    func bumpVersion () { version &+= 1 }
+
     private var data: UnsafeMutableBufferPointer<CharData>
     private var dataSize: Int
 
@@ -93,8 +102,10 @@ public final class BufferLine: CustomDebugStringConvertible {
                 // All bugs I was aware of have been handled, but keep this message here to
                 // help future refactorings.
                 print("BufferLine: You passed an index out of range, adjusting to prevent crash, but you should debug")
+                if !data[dataSize-1].rendersSame(as: value) { bumpVersion() }
                 data[dataSize-1] = value
             } else {
+                if !data[index].rendersSame(as: value) { bumpVersion() }
                 data[index] = value
             }
         }
@@ -106,6 +117,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     }
 
     func clear(with attribute: Attribute) {
+        bumpVersion()
         let empty = CharData(attribute: attribute)
         data.update(repeating: empty)
         images = nil
@@ -132,6 +144,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     ///  - fillData: the data that will be filled into the line
     public func insertCells (pos: Int, n: Int, rightMargin: Int, fillData: CharData)
     {
+        bumpVersion()
         let len = rightMargin + 1
         let pos = pos % len
         if n < len - pos {
@@ -151,6 +164,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     /// Removes the cells at the specified position, shifting data leftwards
     public func deleteCells (pos: Int, n: Int, rightMargin: Int, fillData: CharData)
     {
+        bumpVersion()
         let len = rightMargin + 1
         let p = pos % len
         if n < len - p {
@@ -170,6 +184,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     /// Replaces the cells in the start to end range with the specified fill data
     public func replaceCells (start: Int, end: Int, fillData : CharData)
     {
+        bumpVersion()
         let length = dataSize
         var idx = start
         while idx < end && idx < length {
@@ -182,6 +197,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     /// `fillData` values, if it is smaller, the data is trimmed
     public func resize (cols: Int, fillData: CharData)
     {
+        bumpVersion()
         let len = dataSize
         if len == cols {
             return
@@ -236,6 +252,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     /// Fills the entire bufferline with the specified ``CharData``
     public func fill (with: CharData)
     {
+        bumpVersion()
         data.update(repeating: with)
     }
 
@@ -246,6 +263,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     ///  - len: number of columns to fill
     public func fill (with: CharData, atCol: Int, len: Int)
     {
+        bumpVersion()
         for i in 0..<len {
             data [i+atCol] = with
         }
@@ -254,6 +272,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     /// Fills the current BufferLine with the contents of another BufferLine.
     public func copyFrom (line: BufferLine)
     {
+        bumpVersion()
         let srcSize = line.dataSize
         if data.count < srcSize {
             data.deinitialize()
@@ -296,6 +315,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     ///  - len: the number of elements to copy
     public func copyFrom (_ src: BufferLine, srcCol: Int, dstCol: Int, len: Int)
     {
+        bumpVersion()
         if src === self && srcCol > dstCol {
             // Overlapping forward copy: go left-to-right (already safe)
             for i in 0..<len {
@@ -359,6 +379,7 @@ public final class BufferLine: CustomDebugStringConvertible {
     /// Attaches the specified terminal image to this buffer line.
     /// This method is internal - use Buffer.attachImage() to attach images with proper tracking.
     func attach (image: TerminalImage) {
+        bumpVersion()
         if var imageArray = self.images {
             imageArray.append (image)
             images = imageArray

@@ -292,6 +292,15 @@ public struct CharData: CustomDebugStringConvertible {
         self.init(attribute: attribute, code: 0, size: 1)
     }
     
+    /// True when this cell would render identically to `other`.
+    /// Used to avoid marking a line as changed when a full-screen repaint
+    /// rewrites a cell with exactly the content it already had.
+    @inline(__always)
+    func rendersSame (as other: CharData) -> Bool {
+        code == other.code && width == other.width &&
+        payload.code == other.payload.code && attribute == other.attribute
+    }
+
     public var isSimpleRune: Bool {
         get {
             return code < CharData.maxRune

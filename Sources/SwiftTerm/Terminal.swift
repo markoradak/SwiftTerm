@@ -329,6 +329,13 @@ open class Terminal {
     private var synchronizedOutputActive: Bool = false
     private var synchronizedOutputBuffer: Buffer?
     private var synchronizedOutputBufferIsAlternate: Bool = false
+    /// Identity + content version of each visible row when synchronized output
+    /// began, so that ending it can refresh only the rows that actually changed.
+    private var synchronizedRowSignatures: [(line: ObjectIdentifier, version: UInt64)] = []
+    /// Restores the previous blanket full-screen refresh, so a test can compare
+    /// the two behaviours through the identical rendering pipeline.
+    static let forceFullSynchronizedRefresh =
+        ProcessInfo.processInfo.environment["SWIFTTERM_FULL_SYNC_REFRESH"] != nil
     private var synchronizedOutputTimeoutItem: DispatchWorkItem?
 
     var displayBuffer: Buffer {
@@ -5462,9 +5469,11 @@ open class Terminal {
             synchronizedOutputActive = true
             synchronizedOutputBuffer = snapshotBuffer(buffer)
             synchronizedOutputBufferIsAlternate = isCurrentBufferAlternate
+            captureSynchronizedRowSignatures()
         } else if synchronizedOutputBuffer == nil {
             synchronizedOutputBuffer = snapshotBuffer(buffer)
             synchronizedOutputBufferIsAlternate = isCurrentBufferAlternate
+            captureSynchronizedRowSignatures()
         }
         scheduleSynchronizedOutputTimeout()
         if !wasActive {
@@ -5478,11 +5487,14 @@ open class Terminal {
             return
         }
         synchronizedOutputActive = false
+        let signatures = synchronizedRowSignatures
+        synchronizedRowSignatures = []
+        let wasAlternate = synchronizedOutputBufferIsAlternate
         synchronizedOutputBuffer = nil
         synchronizedOutputBufferIsAlternate = false
         synchronizedOutputTimeoutItem?.cancel()
         synchronizedOutputTimeoutItem = nil
-        refresh (startRow: 0, endRow: rows - 1)
+        refreshRowsChangedDuringSynchronizedOutput(signatures, wasAlternate: wasAlternate)
         tdel?.synchronizedOutputChanged(source: self, active: false)
     }
 
@@ -5497,6 +5509,61 @@ open class Terminal {
         }
         synchronizedOutputTimeoutItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + synchronizedOutputTimeoutSeconds, execute: workItem)
+    }
+
+    private func captureSynchronizedRowSignatures ()
+    {
+        synchronizedRowSignatures.removeAll (keepingCapacity: true)
+        synchronizedRowSignatures.reserveCapacity (rows)
+        let base = buffer.yBase
+        for y in 0..<rows {
+            let index = base + y
+            guard index >= 0 && index < buffer.lines.count else {
+                synchronizedRowSignatures.removeAll (keepingCapacity: true)
+                return
+            }
+            let line = buffer.lines [index]
+            synchronizedRowSignatures.append ((ObjectIdentifier (line), line.version))
+        }
+    }
+
+    /// While synchronized output is active the view renders the snapshot taken
+    /// at the start, so the only rows whose appearance changes when it ends are
+    /// the ones that differ from that snapshot. Marking the whole screen dirty
+    /// instead — which is what this used to do — made every frame of every
+    /// agent TUI that uses DECSET 2026 a full-screen redraw, no matter how
+    /// little it changed. Any doubt (resize, screen switch, missing capture)
+    /// falls back to the full refresh.
+    private func refreshRowsChangedDuringSynchronizedOutput (
+        _ signatures: [(line: ObjectIdentifier, version: UInt64)], wasAlternate: Bool)
+    {
+        guard !Terminal.forceFullSynchronizedRefresh,
+              signatures.count == rows,
+              wasAlternate == isCurrentBufferAlternate else {
+            refresh (startRow: 0, endRow: rows - 1)
+            return
+        }
+        let base = buffer.yBase
+        var changedStart = -1
+        var changedEnd = -1
+        for y in 0..<rows {
+            let index = base + y
+            guard index >= 0 && index < buffer.lines.count else {
+                refresh (startRow: 0, endRow: rows - 1)
+                return
+            }
+            let line = buffer.lines [index]
+            let signature = signatures [y]
+            if ObjectIdentifier (line) != signature.line || line.version != signature.version {
+                if changedStart < 0 {
+                    changedStart = y
+                }
+                changedEnd = y
+            }
+        }
+        if changedStart >= 0 {
+            refresh (startRow: changedStart, endRow: changedEnd)
+        }
     }
 
     private func snapshotBuffer (_ source: Buffer) -> Buffer

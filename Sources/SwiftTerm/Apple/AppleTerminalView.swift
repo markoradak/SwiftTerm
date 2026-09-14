@@ -97,6 +97,9 @@ extension TerminalView {
     
     func resetCaches ()
     {
+        #if os(macOS)
+        invalidateDisplayColorCache()
+        #endif
         self.attributes = [:]
         self.urlAttributes = [:]
         self.colors = Array(repeating: nil, count: 256)
@@ -297,6 +300,9 @@ extension TerminalView {
     // Clears the cached state for colors and triggers a full display
     func colorsChanged ()
     {
+        #if os(macOS)
+        invalidateDisplayColorCache()
+        #endif
         urlAttributes = [:]
         attributes = [:]
         
@@ -589,6 +595,21 @@ extension TerminalView {
     //
     // Given a line of text with attributes, returns column-aware segments that can be drawn later.
     //
+    /// Builds the CTLines and per-run attributes for one already-built line.
+    func prepareSegments (_ lineInfo: ViewLineInfo) -> [(segment: ViewLineSegment, ctLine: CTLine, runs: [PreparedRun])] {
+        lineInfo.segments.compactMap { segment in
+            guard segment.attributedString.length > 0 else { return nil }
+            let ctLine = CTLineCreateWithAttributedString(segment.attributedString)
+            guard let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
+            let prepared = runs.compactMap { run -> PreparedRun? in
+                let glyphCount = CTRunGetGlyphCount(run)
+                guard glyphCount > 0 else { return nil }
+                return PreparedRun(run: run, glyphCount: glyphCount, attributes: CTRunGetAttributes(run))
+            }
+            return (segment, ctLine, prepared)
+        }
+    }
+
     func buildAttributedString (row: Int, line: BufferLine, cols: Int) -> ViewLineInfo
     {
         var segments: [ViewLineSegment] = []
@@ -1342,19 +1363,7 @@ extension TerminalView {
             // Both the background and the glyph loop need the same values, and
             // bridging CTRunGetAttributes into a Swift dictionary is the single
             // most expensive thing either loop used to do per run.
-            let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [PreparedRun])] =
-                lineInfo.segments.compactMap { segment in
-                    guard segment.attributedString.length > 0 else { return nil }
-                    let ctLine = CTLineCreateWithAttributedString(segment.attributedString)
-                    guard let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
-                    let prepared = runs.compactMap { run -> PreparedRun? in
-                        let glyphCount = CTRunGetGlyphCount(run)
-                        guard glyphCount > 0 else { return nil }
-                        return PreparedRun(run: run, glyphCount: glyphCount,
-                                           attributes: CTRunGetAttributes(run))
-                    }
-                    return (segment, ctLine, prepared)
-                }
+            let preparedSegments = prepareSegments(lineInfo)
 
             // Background fill loop — uses cached CTLines
             context.saveGState()
