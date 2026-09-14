@@ -157,6 +157,67 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     var urlAttributes: [Attribute: [NSAttributedString.Key:Any]] = [:]
     
     
+    /// Colours arrive as device RGB, but a window's backing store is in the
+    /// display's profile, so every `setFillColor` / `setFill` made CoreGraphics
+    /// convert the components again — per run, per row, per frame. Converting
+    /// each colour once into the destination space and caching the result keeps
+    /// the identical pixels and does the transform once per distinct colour.
+    var displayColorCache: [ObjectIdentifier: (cg: CGColor, ns: NSColor)] = [:]
+    var displayColorSpace: CGColorSpace? = nil
+    var displayColorSpaceResolved = false
+
+    open override func viewDidChangeBackingProperties () {
+        super.viewDidChangeBackingProperties ()
+        invalidateDisplayColorCache ()
+    }
+
+    open override func viewDidMoveToWindow () {
+        super.viewDidMoveToWindow ()
+        invalidateDisplayColorCache ()
+    }
+
+    func invalidateDisplayColorCache () {
+        displayColorCache.removeAll (keepingCapacity: true)
+        displayColorSpace = nil
+        displayColorSpaceResolved = false
+    }
+
+    /// The colour space the window actually composites in. Nil means "do not
+    /// pre-convert": the drawing path then behaves exactly as it did before.
+    func destinationColorSpace () -> CGColorSpace? {
+        if displayColorSpaceResolved {
+            return displayColorSpace
+        }
+        displayColorSpaceResolved = true
+        displayColorSpace = window?.colorSpace?.cgColorSpace
+        return displayColorSpace
+    }
+
+    /// Returns `color` already expressed in the destination colour space.
+    /// Falls back to the original colour whenever the destination is unknown or
+    /// the conversion fails, so this can only ever remove redundant work.
+    @inline(__always)
+    func displayColors (_ color: NSColor) -> (cg: CGColor, ns: NSColor) {
+        let key = ObjectIdentifier (color)
+        if let hit = displayColorCache[key] {
+            return hit
+        }
+        let source = color.cgColor
+        var resolved = (cg: source, ns: color)
+        if let target = destinationColorSpace(), source.colorSpace != target,
+           let converted = source.converted(to: target, intent: .defaultIntent, options: nil),
+           let asColor = NSColor(cgColor: converted) {
+            resolved = (cg: converted, ns: asColor)
+        }
+        // Truecolour output can mint unbounded distinct colours; this cache is an
+        // optimisation, so dropping it wholesale is always safe.
+        if displayColorCache.count > 4096 {
+            displayColorCache.removeAll (keepingCapacity: true)
+        }
+        displayColorCache[key] = resolved
+        return resolved
+    }
+
     // Cache for the colors in the 0..255 range
     var colors: [NSColor?] = Array(repeating: nil, count: 256)
     var trueColors: [Attribute.Color:NSColor] = [:]

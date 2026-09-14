@@ -19,6 +19,15 @@ import SwiftUI
 
 let SwiftTermUnderlineStyleKey = NSAttributedString.Key("SwiftTermUnderlineStyle")
 
+
+// Cached CFString keys for run-attribute lookups (see PreparedRun).
+private let preparedRunFontKey = NSAttributedString.Key.font.rawValue as NSString
+private let preparedRunForegroundKey = NSAttributedString.Key.foregroundColor.rawValue as NSString
+private let preparedRunBackgroundKey = NSAttributedString.Key.backgroundColor.rawValue as NSString
+private let preparedRunSelectionBackgroundKey = NSAttributedString.Key.selectionBackgroundColor.rawValue as NSString
+private let preparedRunUnderlineKey = NSAttributedString.Key.underlineStyle.rawValue as NSString
+private let preparedRunStrikethroughKey = NSAttributedString.Key.strikethroughStyle.rawValue as NSString
+
 #if os(iOS) || os(visionOS)
 import UIKit
 typealias TTColor = UIColor
@@ -598,6 +607,13 @@ extension TerminalView {
         var lastAttr: Attribute? = nil
         var lastHasUrl = false
         var lastIsSelected = false
+        // getAttributes is a dictionary lookup keyed on Attribute, and it used to
+        // run for every cell even though the loop below already batches cells
+        // that share one. Remembering the previous cell's answer makes it run
+        // once per run of identical attributes instead.
+        var resolvedAttr: Attribute? = nil
+        var resolvedHasUrl = false
+        var resolvedAttributes: [NSAttributedString.Key: Any]? = nil
 
         func flushPending() {
             if !pendingText.isEmpty, let attrs = pendingAttrs {
@@ -611,7 +627,16 @@ extension TerminalView {
             let width = max(1, Int(ch.width))
             let attr = ch.attribute
             let hasUrl = shouldUnderlineLink(row: row, column: col, width: width, cell: ch)
-            guard let attributes = getAttributes(attr, withUrl: hasUrl) else {
+            let reusable: [NSAttributedString.Key: Any]?
+            if let previous = resolvedAttr, previous == attr, resolvedHasUrl == hasUrl {
+                reusable = resolvedAttributes
+            } else {
+                reusable = getAttributes(attr, withUrl: hasUrl)
+                resolvedAttr = attr
+                resolvedHasUrl = hasUrl
+                resolvedAttributes = reusable
+            }
+            guard let attributes = reusable else {
                 flushPending()
                 if let finished = builder?.buildIfNeeded() {
                     segments.append(finished)
@@ -905,6 +930,52 @@ extension TerminalView {
         }
         let endColumn = column + width
         return selectionRange.lowerBound < endColumn && column < selectionRange.upperBound
+    }
+
+    /// One CoreText run with its attributes already resolved.
+    ///
+    /// The background-fill loop and the glyph loop both need the same handful of
+    /// values. They used to call `CTRunGetAttributes(run) as? [NSAttributedString.Key: Any]`
+    /// separately, and that cast bridges the whole CFDictionary into a Swift
+    /// dictionary — hashing and bridging every key — twice per run, for every
+    /// run, on every draw. The values are read here once, straight out of the
+    /// CFDictionary, and the Swift dictionary is materialised only for the rare
+    /// run that actually carries an underline or strikethrough.
+    struct PreparedRun {
+        let run: CTRun
+        let glyphCount: Int
+        let attributes: CFDictionary
+        let font: TTFont?
+        let foregroundColor: TTColor?
+        let backgroundColor: TTColor?
+        let selectionBackgroundColor: TTColor?
+        let hasDecorations: Bool
+
+        init (run: CTRun, glyphCount: Int, attributes: CFDictionary) {
+            self.run = run
+            self.glyphCount = glyphCount
+            self.attributes = attributes
+            self.font = PreparedRun.value (attributes, preparedRunFontKey) as? TTFont
+            self.foregroundColor = PreparedRun.value (attributes, preparedRunForegroundKey) as? TTColor
+            self.backgroundColor = PreparedRun.value (attributes, preparedRunBackgroundKey) as? TTColor
+            self.selectionBackgroundColor = PreparedRun.value (attributes, preparedRunSelectionBackgroundKey) as? TTColor
+            self.hasDecorations = PreparedRun.value (attributes, preparedRunUnderlineKey) != nil ||
+                                  PreparedRun.value (attributes, preparedRunStrikethroughKey) != nil
+        }
+
+        /// Reads one key without bridging the dictionary. The keys are CFStrings
+        /// compared with CFEqual, so a separately allocated equal string matches.
+        @inline(__always)
+        static func value (_ attributes: CFDictionary, _ key: NSString) -> AnyObject? {
+            guard let raw = CFDictionaryGetValue (attributes, Unmanaged.passUnretained (key).toOpaque()) else {
+                return nil
+            }
+            return Unmanaged<AnyObject>.fromOpaque (raw).takeUnretainedValue()
+        }
+
+        var bridgedAttributes: [NSAttributedString.Key: Any] {
+            (attributes as? [NSAttributedString.Key: Any]) ?? [:]
+        }
     }
 
     func drawRunAttributes(_ attributes: [NSAttributedString.Key : Any], glyphPositions positions: [CGPoint], in currentContext: CGContext) {
@@ -1267,13 +1338,22 @@ extension TerminalView {
                 overTextKittyImages.sort(by: sortKitty)
             }
 
-            // Pre-create CTLines and runs once per row to avoid duplicate creation
-            let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [CTRun])] =
+            // Pre-create CTLines and resolve each run's attributes ONCE per row.
+            // Both the background and the glyph loop need the same values, and
+            // bridging CTRunGetAttributes into a Swift dictionary is the single
+            // most expensive thing either loop used to do per run.
+            let preparedSegments: [(segment: ViewLineSegment, ctLine: CTLine, runs: [PreparedRun])] =
                 lineInfo.segments.compactMap { segment in
                     guard segment.attributedString.length > 0 else { return nil }
                     let ctLine = CTLineCreateWithAttributedString(segment.attributedString)
                     guard let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] else { return nil }
-                    return (segment, ctLine, runs)
+                    let prepared = runs.compactMap { run -> PreparedRun? in
+                        let glyphCount = CTRunGetGlyphCount(run)
+                        guard glyphCount > 0 else { return nil }
+                        return PreparedRun(run: run, glyphCount: glyphCount,
+                                           attributes: CTRunGetAttributes(run))
+                    }
+                    return (segment, ctLine, prepared)
                 }
 
             // Background fill loop — uses cached CTLines
@@ -1284,26 +1364,15 @@ extension TerminalView {
 
             for prepared in preparedSegments {
                 var processedGlyphs = 0
-                for run in prepared.runs {
-                    let runGlyphsCount = CTRunGetGlyphCount(run)
-                    if runGlyphsCount == 0 {
-                        continue
-                    }
-                    let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
+                for runInfo in prepared.runs {
+                    let runGlyphsCount = runInfo.glyphCount
                     let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
                     let endColumn = startColumn + (runGlyphsCount * prepared.segment.columnWidth)
-                    var backgroundColor: TTColor?
-                    if runAttributes.keys.contains(.selectionBackgroundColor) {
-                        backgroundColor = runAttributes[.selectionBackgroundColor] as? TTColor
-                    } else if runAttributes.keys.contains(.backgroundColor) {
-                        backgroundColor = runAttributes[.backgroundColor] as? TTColor
-                    }
+                    let backgroundColor = runInfo.selectionBackgroundColor ?? runInfo.backgroundColor
 
                     if let backgroundColor = backgroundColor {
                         let columnSpan = max(0, endColumn - startColumn)
                         if columnSpan > 0 {
-                            context.setFillColor(backgroundColor.cgColor)
-
                             var rect = CGRect(
                                 x: lineOrigin.x + (CGFloat(startColumn) * cellDimension.width),
                                 y: lineOrigin.y,
@@ -1323,9 +1392,12 @@ extension TerminalView {
                             }
 
                             #if os(macOS)
-                            backgroundColor.setFill()
+                            // Pre-converted to the window's colour space, so the
+                            // fill no longer re-runs a colour transform per run.
+                            displayColors(backgroundColor).ns.setFill()
                             rect.fill()
                             #else
+                            context.setFillColor(backgroundColor.cgColor)
                             context.fill(rect)
                             #endif
                         }
@@ -1366,15 +1438,15 @@ extension TerminalView {
             #endif
 
             // Glyph drawing loop — reuses cached CTLines
+            // Reset per row: the background loop's restoreGState above may have
+            // changed the context's fill colour space.
+            var lastFillColorSpace: CGColorSpace? = nil
             for prepared in preparedSegments {
                 var processedGlyphs = 0
-                for run in prepared.runs {
-                    let runGlyphsCount = CTRunGetGlyphCount(run)
-                    if runGlyphsCount == 0 {
-                        continue
-                    }
-                    let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
-                    let runFont = runAttributes[.font] as! TTFont
+                for runInfo in prepared.runs {
+                    let run = runInfo.run
+                    let runGlyphsCount = runInfo.glyphCount
+                    let runFont = runInfo.font ?? fontSet.normal
                     let startColumn = prepared.segment.column + (processedGlyphs * prepared.segment.columnWidth)
 
                     let runGlyphs = [CGGlyph](unsafeUninitializedCapacity: runGlyphsCount) { (bufferPointer, count) in
@@ -1394,21 +1466,37 @@ extension TerminalView {
                             y: lineOrigin.y + yOffset + ctPosition.y)
                     }
 
-                    nativeForegroundColor.set()
-
-                    if runAttributes.keys.contains(.foregroundColor) {
-                        let color = runAttributes[.foregroundColor] as! TTColor
+                    // A run that carries its own foreground colour overwrote the
+                    // native one on the very next line, so setting it first was
+                    // pure colour-conversion work. Decorations set their own
+                    // stroke colour before stroking, so nothing else relied on it.
+                    if let color = runInfo.foregroundColor {
+                        #if os(macOS)
+                        let cgColor = displayColors(color).cg
+                        #else
                         let cgColor = color.cgColor
-                        if let colorSpace = cgColor.colorSpace {
+                        #endif
+                        if let colorSpace = cgColor.colorSpace, colorSpace != lastFillColorSpace {
                             context.setFillColorSpace(colorSpace)
+                            lastFillColorSpace = colorSpace
                         }
                         context.setFillColor(cgColor)
+                    } else {
+                        #if os(macOS)
+                        displayColors(nativeForegroundColor).ns.set()
+                        #else
+                        nativeForegroundColor.set()
+                        #endif
+                        lastFillColorSpace = nil
                     }
 
                     CTFontDrawGlyphs(runFont, runGlyphs, &positions, positions.count, context)
 
-                    // Draw other attributes
-                    drawRunAttributes(runAttributes, glyphPositions: positions, in: context)
+                    // Draw other attributes. Bridging the attribute dictionary is
+                    // only paid by the rare run that actually carries decorations.
+                    if runInfo.hasDecorations {
+                        drawRunAttributes(runInfo.bridgedAttributes, glyphPositions: positions, in: context)
+                    }
 
                     processedGlyphs += runGlyphsCount
                 }
