@@ -162,7 +162,10 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// convert the components again — per run, per row, per frame. Converting
     /// each colour once into the destination space and caching the result keeps
     /// the identical pixels and does the transform once per distinct colour.
-    var displayColorCache: [ObjectIdentifier: (cg: CGColor, ns: NSColor)] = [:]
+    /// The entry retains its source colour on purpose: the key is that object's
+    /// identity, and a released colour could be replaced by a different one at
+    /// the same address, which would hand back the wrong colour.
+    var displayColorCache: [ObjectIdentifier: (source: NSColor, cg: CGColor, ns: NSColor)] = [:]
     var displayColorSpace: CGColorSpace? = nil
     var displayColorSpaceResolved = false
 
@@ -197,17 +200,17 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Falls back to the original colour whenever the destination is unknown or
     /// the conversion fails, so this can only ever remove redundant work.
     @inline(__always)
-    func displayColors (_ color: NSColor) -> (cg: CGColor, ns: NSColor) {
+    func displayColors (_ color: NSColor) -> (source: NSColor, cg: CGColor, ns: NSColor) {
         let key = ObjectIdentifier (color)
         if let hit = displayColorCache[key] {
             return hit
         }
         let source = color.cgColor
-        var resolved = (cg: source, ns: color)
+        var resolved = (source: color, cg: source, ns: color)
         if let target = destinationColorSpace(), source.colorSpace != target,
            let converted = source.converted(to: target, intent: .defaultIntent, options: nil),
            let asColor = NSColor(cgColor: converted) {
-            resolved = (cg: converted, ns: asColor)
+            resolved = (source: color, cg: converted, ns: asColor)
         }
         // Truecolour output can mint unbounded distinct colours; this cache is an
         // optimisation, so dropping it wholesale is always safe.
