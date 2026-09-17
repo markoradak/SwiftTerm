@@ -35,20 +35,37 @@ extension Terminal {
     /// text reflows — but a program that draws with cursor addressing will
     /// look wrong until it repaints, which is what the SIGWINCH from the
     /// resize provokes.
-    public func serializeState() -> [UInt8] {
-        var out = Serializer(terminal: self)
+    /// - Parameters:
+    ///   - maxScrollbackLines: how many lines above the screen to include.
+    ///     `nil` keeps all of them. A client that saves this to disk wants a
+    ///     bound; one handing a session over in memory usually does not.
+    ///   - trimTrailingBlankLines: drops the empty rows below the last line
+    ///     with content, and with them the final cursor placement. For a
+    ///     handover the cursor has to land exactly where it was, so this is
+    ///     off by default; for output shown above something new — a previous
+    ///     session restored into a fresh terminal — those rows would push the
+    ///     content off the screen.
+    public func serializeState(maxScrollbackLines: Int? = nil,
+                               trimTrailingBlankLines: Bool = false) -> [UInt8] {
+        var out = Serializer(terminal: self, maxScrollbackLines: maxScrollbackLines,
+                             trimTrailingBlankLines: trimTrailingBlankLines)
         out.run()
         return out.bytes
     }
 
     struct Serializer {
         let terminal: Terminal
+        let maxScrollbackLines: Int?
+        let trimTrailingBlankLines: Bool
         var bytes: [UInt8] = []
         var pen: Attribute?
         var lastLineWasFull = false
 
-        init(terminal: Terminal) {
+        init(terminal: Terminal, maxScrollbackLines: Int? = nil,
+             trimTrailingBlankLines: Bool = false) {
             self.terminal = terminal
+            self.maxScrollbackLines = maxScrollbackLines
+            self.trimTrailingBlankLines = trimTrailingBlankLines
             bytes.reserveCapacity(4096)
         }
 
@@ -59,8 +76,22 @@ extension Terminal {
             csi("3J")
 
             let normal = terminal.normalBuffer
-            let lineCount = min(normal.lines.count, normal.yBase + terminal.rows)
-            for index in 0..<lineCount {
+            var lineCount = min(normal.lines.count, normal.yBase + terminal.rows)
+            if trimTrailingBlankLines {
+                while lineCount > 0 {
+                    let line = normal.lines[lineCount - 1]
+                    if line.hasAnyContent() || hasPaintedCell(line) { break }
+                    lineCount -= 1
+                }
+            }
+            // Keep the screen whole and trim the oldest scrollback, which is
+            // what a reader scrolling up would give up first anyway.
+            var first = 0
+            if let maxScrollbackLines {
+                let allowed = maxScrollbackLines + terminal.rows
+                if lineCount > allowed { first = lineCount - allowed }
+            }
+            for index in first..<lineCount {
                 let line = normal.lines[index]
                 // A soft-wrapped continuation is recreated by autowrap, so the
                 // line before it is written whole and gets no newline.
@@ -112,6 +143,13 @@ extension Terminal {
             let keyboardFlags = terminal.keyboardEnhancementFlags.rawValue
             if keyboardFlags != 0 { csi("=\(keyboardFlags);1u") }
             csi("\(cursorStyleParameter) q")
+
+            if trimTrailingBlankLines {
+                // No cursor placement: the rows it referred to are gone, and
+                // whatever comes next continues after the last line.
+                csi(terminal.cursorHidden ? "?25l" : "?25h")
+                return
+            }
 
             // Setting origin mode homes the cursor, so it precedes the final
             // placement, and the row is then relative to the scroll region.
