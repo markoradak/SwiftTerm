@@ -373,7 +373,10 @@ open class Terminal {
     // You can ignore most of the defaults set here, the function
     // reset() will do that again
     var sendFocus: Bool = false
-    var cursorHidden : Bool = false
+    /// Whether the program has hidden the cursor (DECTCEM). Public so a
+    /// client mirroring this terminal can draw it the same way, without
+    /// tracking the show/hide callbacks itself.
+    public internal(set) var cursorHidden : Bool = false
     
     /// Controls the origin mode (DECOM), when set, the screen is limited to the top and bottom margins
     var originMode: Bool = false
@@ -497,7 +500,9 @@ open class Terminal {
     }
     
     // The protocol encoding for the terminal
-    private var mouseProtocol: MouseProtocolEncoding = .x10
+    // `internal` rather than `private` so the state serializer can record the
+    // encoding a program selected (`TerminalStateSerializer.swift`).
+    var mouseProtocol: MouseProtocolEncoding = .x10
 
     // This is used to track if we are setting the colors, to prevent a
     // recursive invocation (nativeForegroundColor sets the terminal
@@ -567,10 +572,37 @@ open class Terminal {
     public func setTerminalFocus(_ focused: Bool) {
         if sendFocus {
             let data: [UInt8] = cc.CSI + [focused ? 0x49 : 0x4f]
-            tdel?.send(source: self, data: data[0...])
+            withSendOrigin(.event) { tdel?.send(source: self, data: data[0...]) }
         }
     }
     
+    /// Why the terminal is sending bytes to the host: an answer to something
+    /// the program asked, or an event the user caused.
+    ///
+    /// Both leave through `TerminalDelegate.send(source:data:)`, and a client
+    /// that mirrors a terminal it does not own needs to tell them apart: the
+    /// side that owns the pty answers the questions, and a second answer from
+    /// the mirroring side would reach the program as input. (Shiftover reads
+    /// this when a pane is attached to its pty host.)
+    public enum SendOrigin {
+        /// An answer to a query: cursor position, device attributes, a mode
+        /// report, a colour report.
+        case reply
+        /// Something the user did: a mouse report, a focus change.
+        case event
+    }
+
+    /// What the send currently being delivered is. Only meaningful inside a
+    /// `TerminalDelegate.send(source:data:)` call.
+    public private(set) var currentSendOrigin: SendOrigin = .reply
+
+    func withSendOrigin(_ origin: SendOrigin, _ body: () -> Void) {
+        let previous = currentSendOrigin
+        currentSendOrigin = origin
+        body()
+        currentSendOrigin = previous
+    }
+
     ///
     /// Represents the mouse operation mode that the terminal is currently using and higher level
     /// implementations should use the functions in this enumeration to determine what events to
@@ -4837,7 +4869,7 @@ open class Terminal {
      */
     public func sendResponse (text: String)
     {
-        tdel?.send (source: self, data: ([UInt8] (text.utf8))[...])
+        withSendOrigin(.reply) { tdel?.send (source: self, data: ([UInt8] (text.utf8))[...]) }
     }
     
     /**
@@ -4859,7 +4891,7 @@ open class Terminal {
                 log ("Do not know how to handle type \(item)")
             }
         }
-        tdel?.send (source: self, data: buffer[...])
+        withSendOrigin(currentSendOrigin) { tdel?.send (source: self, data: buffer[...]) }
     }
     
 #if DEBUG
@@ -5707,6 +5739,13 @@ open class Terminal {
      * - Parameter y: Y coordinate for the event
      */
     public func sendEvent (buttonFlags: Int, x: Int, y: Int, pixelX: Int, pixelY: Int)
+    {
+        withSendOrigin(.event) {
+            sendEventBody(buttonFlags: buttonFlags, x: x, y: y, pixelX: pixelX, pixelY: pixelY)
+        }
+    }
+
+    private func sendEventBody (buttonFlags: Int, x: Int, y: Int, pixelX: Int, pixelY: Int)
     {
         //print ("got \(mouseProtocol)")
         switch mouseProtocol {
