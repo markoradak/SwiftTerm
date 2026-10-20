@@ -949,6 +949,20 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     ///
     /// If this is set to `false`, then the key is passed to the OS, which produces the
     /// OS specific feature.
+    /// When set, the terminal keeps this grid whatever the view's size or
+    /// font. For a view that mirrors a terminal sized somewhere else (another
+    /// Mac's): fitting the grid to this view would reflow what that terminal
+    /// drew. Size the view with `getOptimalFrameSize()` instead.
+    public var fixedGridSize: (cols: Int, rows: Int)? {
+        didSet { applyFixedGridSize() }
+    }
+
+    /// Adjusts the colours this view draws (see `ColorAdjustment`), for a
+    /// view showing output written for another terminal's theme.
+    public var colorAdjustment: ColorAdjustment? {
+        didSet { if colorAdjustment != oldValue { colorAdjustmentChanged () } }
+    }
+
     public var optionAsMetaKey: Bool = true
 
     private struct PendingKittyKeyEvent {

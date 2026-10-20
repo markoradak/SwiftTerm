@@ -39,6 +39,13 @@ extension UIColor {
                         alpha: fAlpha)
     }
 
+    /// RGB components, for `ColorAdjustment`.
+    var adjustmentRGB: ColorAdjustment.RGB? {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        guard getRed (&r, green: &g, blue: &b, alpha: &a) else { return nil }
+        return (Double (r), Double (g), Double (b))
+    }
+
     static func make (red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) -> TTColor
     {
         

@@ -47,6 +47,12 @@ extension NSColor {
                         alpha: fAlpha)
     }
 
+    /// Device RGB components, for `ColorAdjustment`.
+    var adjustmentRGB: ColorAdjustment.RGB? {
+        guard let rgb = usingColorSpace (.deviceRGB) else { return nil }
+        return (Double (rgb.redComponent), Double (rgb.greenComponent), Double (rgb.blueComponent))
+    }
+
     static func make (red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) -> NSColor
     {
         return NSColor (deviceRed: red, green: green, blue: blue, alpha: alpha)

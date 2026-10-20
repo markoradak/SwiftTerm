@@ -111,8 +111,8 @@ extension TerminalView {
     {
         resetCaches()
         self.cellDimension = computeFontDimensions ()
-        let newCols = Int(frame.width / cellDimension.width)
-        let newRows = Int(frame.height / cellDimension.height)
+        let newCols = fixedGridSize?.cols ?? Int(frame.width / cellDimension.width)
+        let newRows = fixedGridSize?.rows ?? Int(frame.height / cellDimension.height)
         resize(cols: newCols, rows: newRows)
         updateCaretView()
         
@@ -184,8 +184,8 @@ extension TerminalView {
     /// Returns true if this changed the number of columns/rows, false otherwise
     @discardableResult
     func processSizeChange (newSize: CGSize) -> Bool {
-        let newRows = Int (newSize.height / cellDimension.height)
-        let newCols = Int (getEffectiveWidth (size: newSize) / cellDimension.width)
+        let newRows = fixedGridSize?.rows ?? Int (newSize.height / cellDimension.height)
+        let newCols = fixedGridSize?.cols ?? Int (getEffectiveWidth (size: newSize) / cellDimension.width)
         
         if newCols != terminal.cols || newRows != terminal.rows {
             selection.active = false
@@ -203,6 +203,24 @@ extension TerminalView {
         return false
     }
     
+    /// Cached attributes hold adjusted colours; drop them and redraw.
+    func colorAdjustmentChanged () {
+        resetCaches ()
+        #if os(macOS)
+        needsDisplay = true
+        #else
+        setNeedsDisplay (bounds)
+        #endif
+    }
+
+    /// Puts the terminal on `fixedGridSize` (or back on the view's own fit).
+    func applyFixedGridSize () {
+        #if os(macOS)
+        guard cellDimension != nil else { return }
+        #endif
+        _ = processSizeChange (newSize: frame.size)
+    }
+
     // Computes the font dimensions once font.normal has been set
     func computeFontDimensions () -> CellDimension
     {
@@ -467,7 +485,14 @@ extension TerminalView {
         }
         
         var fgColor = mapColor (color: fg, isFg: true, isBold: isBold, useBrightColors: useBrightColors)
-        let bgColor = mapColor (color: bg, isFg: false, isBold: false)
+        var bgColor = mapColor (color: bg, isFg: false, isBold: false)
+        if let adjustment = colorAdjustment, let fgRGB = fgColor.adjustmentRGB, let bgRGB = bgColor.adjustmentRGB {
+            var isTrueColor = false
+            if case .trueColor = bg { isTrueColor = true }
+            let adjusted = adjustment.adjust (foreground: fgRGB, background: bgRGB, backgroundIsTrueColor: isTrueColor)
+            fgColor = TTColor.make (red: CGFloat (adjusted.foreground.r), green: CGFloat (adjusted.foreground.g), blue: CGFloat (adjusted.foreground.b), alpha: 1)
+            bgColor = TTColor.make (red: CGFloat (adjusted.background.r), green: CGFloat (adjusted.background.g), blue: CGFloat (adjusted.background.b), alpha: 1)
+        }
         // Apply dim/faint attribute (SGR 2)
         if flags.contains (.dim) {
             fgColor = fgColor.dimmedColor (towards: bgColor)
