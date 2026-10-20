@@ -774,6 +774,14 @@ open class Terminal {
         return buffer.lines [row + buffer.yDisp]
     }
 
+    /// The scroll-invariant number of a row of the active screen, for
+    /// `getScrollInvariantLine(row:)`. It keeps naming the same line after the
+    /// screen scrolls and whatever the view is scrolled back to, until the
+    /// line leaves the scrollback.
+    public func scrollInvariantRow (screenRow: Int) -> Int {
+        return buffer.yBase + screenRow + buffer.linesTop
+    }
+
     /// Returns the contents of a line as a BufferLine counting from the begging of the scroll buffer.
     ///
     /// The line is counted  from start of scroll back, not what the terminal has visible right now.

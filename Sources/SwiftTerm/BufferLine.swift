@@ -21,7 +21,8 @@ public final class BufferLine: CustomDebugStringConvertible {
         /// Renders the bottom of a character, using two cells
         case doubledDown
     }
-    var isWrapped: Bool
+    /// Whether this line continues the one above it (the text wrapped at the margin).
+    public internal(set) var isWrapped: Bool
     var renderMode: RenderLineMode = .single
     /// Incremented whenever this line's rendered content actually changes.
     /// A renderer can cache per-line work against it. It deliberately does NOT
